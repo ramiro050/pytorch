@@ -125,7 +125,7 @@ void checkAllocNodes(
       << ss.str() << "\n";
 }
 
-TEST(MemoryPlannerTest, Small) {
+TEST(MemoryPlannerTest, SmallNaive) {
   // setup inputs
   auto in1 = at::randn({10, 10}, at::kCPU);
   auto in2 = at::randn({10, 10}, at::kCPU);
@@ -155,6 +155,37 @@ TEST(MemoryPlannerTest, Small) {
   jit::planMemory(graph_copy, Strategy::NAIVE);
   checkAllocNodes(
       *graph_copy, expected_storage, expected_allocs, expected_successors);
+}
+
+TEST(MemoryPlannerTest, SmallLinearScan) {
+  // setup inputs
+  auto in1 = at::randn({10, 10}, at::kCPU);
+  auto in2 = at::randn({10, 10}, at::kCPU);
+  auto in3 = at::randn({10, 10}, at::kCPU);
+  auto in4 = at::randn({10, 10}, at::kCPU);
+  auto stack = createStack({in1, in2, in3, in4});
+
+  auto g = build_small();
+  // run once to type info
+  auto pr = jit::ProfilingRecord::instrumentGraph(g);
+  auto graph = pr->profiled_graph_;
+  Code cd(graph, "small");
+  InterpreterState is{cd};
+  is.run(stack);
+
+  // plan
+  ProfilingRecord::removeProfileCounter(graph->block());
+  jit::RemoveProfileNodesAndSpecializeTypes(graph);
+  jit::planMemory(graph, Strategy::LINEAR_SCAN);
+
+  StorageAttrs expected_storage = {896, DeviceType::CPU};
+  std::vector<AllocAttrs> expected_allocs = {
+      {448, 0, {10, 10}, {10, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {448, 448, {10, 10}, {10, 1}, DeviceType::CPU, at::ScalarType::Float},
+  };
+  std::vector<std::string> expected_successors = {"aten::mm", "aten::mm"};
+  checkAllocNodes(
+      *graph, expected_storage, expected_allocs, expected_successors);
 }
 
 std::vector<at::Tensor> buildLSTMInputTensors(
@@ -207,6 +238,50 @@ TEST(MemoryPlannerTest, LSTMNaive) {
       {256, 4096, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
       {256, 4352, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
       {256, 4608, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
+  };
+  std::vector<std::string> expected_successors = {
+      "aten::mm",
+      "aten::mm",
+      "aten::add",
+      "aten::sigmoid",
+      "aten::sigmoid",
+      "aten::tanh",
+      "aten::sigmoid",
+      "aten::mul",
+      "aten::mul",
+      "aten::tanh"};
+  checkAllocNodes(
+      *graph, expected_storage, expected_allocs, expected_successors);
+}
+
+TEST(MemoryPlannerTest, LSTMLinearScan) {
+  std::shared_ptr<Graph> g;
+  Stack stack;
+  std::tie(g, stack) = buildLSTMWithStack();
+  // run once to type info
+  auto pr = jit::ProfilingRecord::instrumentGraph(g);
+  auto graph = pr->profiled_graph_;
+  Code cd(graph, "lstm");
+  InterpreterState is{cd};
+  is.run(stack);
+
+  // plan
+  ProfilingRecord::removeProfileCounter(graph->block());
+  jit::RemoveProfileNodesAndSpecializeTypes(graph);
+  jit::planMemory(graph, Strategy::LINEAR_SCAN);
+
+  StorageAttrs expected_storage = {3072, DeviceType::CPU};
+  std::vector<AllocAttrs> expected_allocs = {
+      {1024, 0, {1, 256}, {256, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {1024, 1024, {1, 256}, {256, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {1024, 2048, {1, 256}, {256, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {256, 0, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {256, 256, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {256, 512, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {256, 768, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {256, 1024, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {256, 768, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
+      {256, 0, {1, 64}, {64, 1}, DeviceType::CPU, at::ScalarType::Float},
   };
   std::vector<std::string> expected_successors = {
       "aten::mm",
