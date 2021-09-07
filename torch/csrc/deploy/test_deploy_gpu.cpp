@@ -65,3 +65,17 @@ TEST(TorchDeployGPUTest, UsesDistributed) {
     I.self.attr("import_module")({"uses_distributed"});
   }
 }
+
+TEST(TorchDeployGPUTest, TensorrtModel) {
+  if (!torch::cuda::is_available()) {
+    GTEST_SKIP();
+  }
+  auto packagePath = path(
+      "TENSORRT_IMPORT", "torch/csrc/deploy/example/generated/tensorrt_import");
+  torch::deploy::InterpreterManager m(1);
+  torch::deploy::Package p = m.load_package(packagePath);
+  auto model = p.load_pickle("tensorrt_example", "model.pkl");
+  auto input = at::ones({1, 2, 3}).cuda();
+  auto output = input * 2;
+  ASSERT_TRUE(output.allclose(model(at::IValue{input}).toTensor()));
+}
