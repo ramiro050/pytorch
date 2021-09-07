@@ -144,13 +144,13 @@ std::pair<std::vector<int64_t>, std::vector<int64_t>> getSizesStrides(
 
 Node* insertAllocStorageNode(
     const std::shared_ptr<Graph>& graph,
-    size_t total_size) {
+    size_t total_size,
+    c10::optional<at::Device> device_type = c10::nullopt) {
   auto* storage = graph->create(prim::AllocateStorage, 1);
   // there is no e.g. ui_ because pytorch doesn't have a uint64 ScalarType
   storage->i_(attr::total_size, (int64_t)total_size);
 
-  auto device_type = jit::tensorexpr::pickDeviceType(graph);
-  if (device_type.has_value()) {
+  if (device_type || (device_type = jit::tensorexpr::pickDeviceType(graph))) {
     storage->i_(attr::device, static_cast<int8_t>(device_type.value().type()));
   } else {
     storage->i_(attr::device, static_cast<int8_t>(at::kCPU));
@@ -190,6 +190,51 @@ void insertAllocTensorNodes(
     alloc->i_(attr::device, static_cast<int8_t>(storage.i(attr::device)));
     alloc->i_(attr::dtype, static_cast<int8_t>(ttp->scalarType().value()));
   }
+}
+
+std::vector<Node*> insertPreAllocTensorNodes(
+    std::shared_ptr<Graph>& graph,
+    Node* storage,
+    std::vector<MemAllocation> allocations,
+    std::vector<std::pair<FrameNodeId, std::vector<UniqueLiveRange>>>
+        collected_node_live_ranges) {
+  SortedLiveRangeMap<MemRegion> allocations_map;
+  for (const auto& item : allocations) {
+    allocations_map[item.ulvr] = item.reg;
+  }
+
+  std::sort(
+      collected_node_live_ranges.begin(),
+      collected_node_live_ranges.end(),
+      frameNodeIdCmp());
+
+  std::vector<Node*> inserted_alloc_nodes;
+  for (auto& item : collected_node_live_ranges) {
+    auto frame_id = item.first;
+    auto lvrs = item.second;
+    std::sort(lvrs.begin(), lvrs.end(), liveRangeStartCmp());
+    auto node = frame_id.node;
+
+    for (const auto& lvr : lvrs) {
+      auto region = allocations_map[lvr];
+      auto* alloc = graph->create(prim::PreAllocateTensor, 1);
+      inserted_alloc_nodes.emplace_back(alloc);
+      GRAPH_DEBUG(
+          "inserting preallocation op for ",
+          getHeader(node),
+          " ",
+          std::addressof(*node),
+          " with size ",
+          region.size);
+      alloc->insertBefore(node);
+      alloc->addInput(storage->output());
+
+      alloc->i_(attr::size, region.size);
+      alloc->i_(attr::offset, region.offset);
+      alloc->i_(attr::device, storage->i(attr::device));
+    }
+  }
+  return inserted_alloc_nodes;
 }
 
 bool hasOutVariant(Node* node) {
@@ -341,6 +386,188 @@ bool validateAllocations(
   }
 
   return true;
+}
+
+std::vector<std::pair<FrameNodeId, std::vector<UniqueLiveRange>>>
+collectLiveRangesPerNode(std::vector<std::pair<UniqueLiveRange, FrameNodeId>>
+                             live_range_node_header) {
+  std::unordered_map<
+      FrameNodeId,
+      std::vector<UniqueLiveRange>,
+      frame_node_id_hash>
+      node_live_ranges;
+
+  for (const auto& item : live_range_node_header) {
+    auto lvr = item.first;
+    auto frame_node_id = item.second;
+    node_live_ranges[frame_node_id].emplace_back(lvr);
+  }
+
+  std::vector<std::pair<FrameNodeId, std::vector<UniqueLiveRange>>>
+      collected_node_live_ranges;
+  for (const auto& item : node_live_ranges) {
+    std::vector<UniqueLiveRange> lvrs(item.second.begin(), item.second.end());
+    std::sort(lvrs.begin(), lvrs.end(), liveRangeStartCmp());
+    collected_node_live_ranges.emplace_back(std::make_pair(item.first, lvrs));
+  }
+  std::sort(
+      collected_node_live_ranges.begin(),
+      collected_node_live_ranges.end(),
+      frameNodeIdCmp());
+  return collected_node_live_ranges;
+}
+
+std::pair<
+    SortedLiveRangeMap<size_t>,
+    std::vector<std::pair<UniqueLiveRange, FrameNodeId>>>
+getManagedLiveRangesFromMemEvents(
+    std::vector<MemEvent> mem_events,
+    const std::shared_ptr<Graph> graph) {
+  SortedLiveRangeMap<size_t> managed_live_ranges;
+  std::vector<std::pair<UniqueLiveRange, FrameNodeId>> live_range_node_header;
+  live_range_node_header.reserve(mem_events.size());
+
+  std::unordered_map<std::string, MemEvent> allocs;
+  auto trace_hasher = std::hash<std::string>();
+  // validate
+  for (auto& mem_event : mem_events) {
+    if (mem_event.type == MemEvent::EventType::Allocate) {
+      if (mem_event.frame_node_id.has_value()) {
+        allocs.insert({mem_event.ptr_addr, mem_event});
+      } else {
+        // created before interpreter started e.g. inputs and weights...
+        TORCH_INTERNAL_ASSERT(mem_event.time == 0);
+      }
+    } else if (mem_event.type == MemEvent::EventType::Free) {
+      TORCH_INTERNAL_ASSERT(allocs.count(mem_event.ptr_addr) > 0);
+      TORCH_INTERNAL_ASSERT(allocs.find(mem_event.ptr_addr) != allocs.end());
+      auto alloc = allocs.at(mem_event.ptr_addr);
+      TORCH_INTERNAL_ASSERT(
+          alloc.type == MemEvent::EventType::Allocate,
+          " ",
+          alloc.type,
+          " ",
+          MemEvent::EventType::Allocate);
+      TORCH_INTERNAL_ASSERT(
+          alloc.size == mem_event.size, " ", alloc.size, " ", mem_event.size);
+      TORCH_INTERNAL_ASSERT(
+          alloc.time < mem_event.time, " ", alloc.time, " ", mem_event.time);
+
+      auto lvr = UniqueLiveRange{
+          {alloc.time, mem_event.time},
+          std::to_string(trace_hasher(mem_event.allocation_trace))};
+      managed_live_ranges.insert({lvr, alloc.size});
+
+      live_range_node_header.emplace_back(
+          std::make_pair(lvr, alloc.frame_node_id.value()));
+      allocs.erase(mem_event.ptr_addr);
+    }
+  }
+
+  if (!allocs.empty()) {
+    // TODO: jit::Value* .count()>0 doesn't work for some reason
+    // std::unordered_set<const jit::Value*> g_outputs;
+    std::unordered_set<std::string> g_outputs;
+    for (const auto& outp : graph->return_node()->outputs()) {
+      std::cout << "return outp " << outp->debugName() << "\n";
+    }
+    for (const auto& outp : graph->outputs()) {
+      g_outputs.insert(outp->debugName());
+    }
+    for (auto& alloc : allocs) {
+      TORCH_INTERNAL_ASSERT(
+          alloc.second.type == MemEvent::EventType::Allocate &&
+          alloc.second.frame_node_id.has_value());
+      GRAPH_DEBUG("leaked alloc: ", alloc.second, "\n");
+      // TODO: this isn't a great heuristic (since tensors created within
+      // the scope of an op could be leaked but not the actual output values.
+      // a better way would be to connect allocs directly to values
+      if (alloc.second.frame_node_id.value().node->outputs().size() > 0) {
+        for (const auto& out :
+             alloc.second.frame_node_id.value().node->outputs()) {
+          TORCH_INTERNAL_ASSERT(
+              g_outputs.count(out->debugName()) > 0, out->debugName());
+        }
+      }
+      TORCH_WARN(alloc.second, " leaked");
+    }
+  }
+  return std::make_pair(managed_live_ranges, live_range_node_header);
+}
+
+void insertCollectAllocatedTensorsNode(
+    std::shared_ptr<Graph>& graph,
+    std::vector<Node*> alloc_nodes) {
+  auto* collect_node = graph->create(prim::Constant, 1);
+  collect_node->s_(attr::name, "CollectAllocatedTensors");
+  collect_node->insertBefore(graph->return_node());
+  for (auto& node : alloc_nodes) {
+    collect_node->addInput(node->output());
+  }
+}
+
+void planMemoryWithTracing(
+    std::shared_ptr<Graph>& graph,
+    Strategy strat,
+    std::vector<MemEvent> mem_events,
+    at::Device device_type) {
+  TORCH_INTERNAL_ASSERT(!mem_events.empty());
+  SortedLiveRangeMap<size_t> managed_live_ranges;
+  std::vector<std::pair<UniqueLiveRange, FrameNodeId>> live_range_node_header;
+  std::tie(managed_live_ranges, live_range_node_header) =
+      getManagedLiveRangesFromMemEvents(mem_events, graph);
+  std::vector<MemAllocation> allocations;
+
+  switch (strat) {
+    case Strategy::NAIVE: {
+      allocations = naive(managed_live_ranges);
+      break;
+    }
+    case Strategy::LINEAR_SCAN: {
+      allocations = linearScanHeuristic(managed_live_ranges);
+      break;
+    }
+    case Strategy::GREEDY_BY_SIZE_WITH_SMALLEST_GAP: {
+      allocations = greedyBySizeWithSmallestGap(managed_live_ranges);
+      break;
+    }
+    case Strategy::GREEDY_BY_SIZE_WITH_FIRST_GAP: {
+      allocations = greedyBySizeWithFirstGap(managed_live_ranges);
+      break;
+    }
+    case Strategy::GREEDY_BY_LONGEST_AND_SIZE_WITH_SMALLEST_GAP: {
+      allocations = greedyByLongestAndSizeWithSmallestGap(managed_live_ranges);
+      break;
+    }
+    case Strategy::GREEDY_BY_LONGEST_AND_SIZE_WITH_FIRST_GAP: {
+      allocations = greedyByLongestAndSizeWithFirstGap(managed_live_ranges);
+      break;
+    }
+    default:
+      return;
+  }
+
+  GRAPH_DEBUG("\nnumber of allocations\n", allocations.size());
+  auto total_size = getTotalAllocationSize(allocations);
+
+  TORCH_INTERNAL_ASSERT(
+      validateAllocations(allocations, managed_live_ranges, total_size),
+      "invalid allocation",
+      strat);
+
+  GRAPH_DEBUG("\ngraph before inserting storage node\n", *graph);
+  auto storage_node = insertAllocStorageNode(graph, total_size, device_type);
+  GRAPH_DEBUG("\ngraph after inserting storage node\n", *graph);
+
+  auto collected_node_live_ranges =
+      collectLiveRangesPerNode(live_range_node_header);
+
+  auto inserted_alloc_nodes = insertPreAllocTensorNodes(
+      graph, storage_node, allocations, collected_node_live_ranges);
+  GRAPH_DEBUG("\ngraph after inserting prealloc nodes\n", *graph);
+  // otherwise
+  insertCollectAllocatedTensorsNode(graph, inserted_alloc_nodes);
+  GRAPH_DEBUG("\ngraph after inserting collect node\n", *graph);
 }
 
 void planMemory(const std::shared_ptr<Graph>& graph, Strategy strat) {
