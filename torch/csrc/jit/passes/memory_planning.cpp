@@ -1,4 +1,5 @@
 #include <torch/csrc/jit/passes/memory_planning.h>
+#include <torch/csrc/jit/passes/memory_planning/greedy_by_size.h>
 #include <torch/csrc/jit/passes/memory_planning/linear_scan.h>
 
 #include <jit/tensorexpr/kernel.h>
@@ -361,6 +362,22 @@ void planMemory(const std::shared_ptr<Graph>& graph, Strategy strat) {
       allocations = linearScanHeuristic(managed_live_ranges);
       break;
     };
+    case Strategy::GREEDY_BY_SIZE_WITH_SMALLEST_GAP: {
+      allocations = greedyBySizeWithSmallestGap(managed_live_ranges);
+      break;
+    }
+    case Strategy::GREEDY_BY_SIZE_WITH_FIRST_GAP: {
+      allocations = greedyBySizeWithFirstGap(managed_live_ranges);
+      break;
+    }
+    case Strategy::GREEDY_BY_LONGEST_AND_SIZE_WITH_SMALLEST_GAP: {
+      allocations = greedyByLongestAndSizeWithSmallestGap(managed_live_ranges);
+      break;
+    }
+    case Strategy::GREEDY_BY_LONGEST_AND_SIZE_WITH_FIRST_GAP: {
+      allocations = greedyByLongestAndSizeWithFirstGap(managed_live_ranges);
+      break;
+    }
     default:
       return;
   }
