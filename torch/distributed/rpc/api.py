@@ -481,8 +481,22 @@ for method_name, method in inspect.getmembers(PyRRef):
     setattr(RRef, method_name, new_method)
 
 
+def to_tensor_to_device(args, devices):
+    # assert len(args) == len(devices)
+    result = {}
+    if args is not None and devices is not None and len(args) == len(devices):
+        for (arg, device) in zip(args, devices):
+            (_, tensors) = _default_pickler.serialize(arg)
+            for tensor in tensors:
+                if tensor in result:
+                    assert result[tensor] == device
+                else:
+                    result[tensor] = device
+    return result
+
+
 @_require_initialized
-def remote(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
+def remote(to, func, args=None, kwargs=None, arg_devices=None, timeout=UNSET_RPC_TIMEOUT):
     r"""
     Make a remote call to run ``func`` on worker ``to`` and return an
     :class:`~torch.distributed.rpc.RRef` to the result value immediately.
@@ -592,6 +606,7 @@ def remote(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
     with ctx_manager as rf:
         args = args if args else ()
         kwargs = kwargs if kwargs else {}
+        tensor_to_device = to_tensor_to_device(args, arg_devices) # tensor_to_device if tensor_to_device else {}
 
         is_async_exec = hasattr(func, "_wrapped_async_rpc_function")
 
@@ -601,11 +616,19 @@ def remote(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
                 func = wrapped
 
         if qualified_name is not None:
-            rref = _invoke_remote_builtin(dst_worker_info, qualified_name, timeout, *args, **kwargs)
+            rref = _invoke_remote_builtin(
+                dst_worker_info,
+                qualified_name,
+                tensor_to_device,
+                timeout,
+                *args,
+                **kwargs,
+            )
         elif isinstance(func, torch.jit.ScriptFunction):
             rref = _invoke_remote_torchscript(
                 dst_worker_info.name,
                 torch._jit_internal._qualified_name(func),
+                tensor_to_device,
                 timeout,
                 is_async_exec,
                 *args,
@@ -619,6 +642,7 @@ def remote(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
                 dst_worker_info,
                 pickled_python_udf,
                 tensors,
+                tensor_to_device,
                 timeout,
                 is_async_exec
             )
@@ -631,7 +655,7 @@ def remote(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
 
     return rref
 
-def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RPC_TIMEOUT):
+def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, arg_devices=None, rpc_timeout=UNSET_RPC_TIMEOUT):
     if not callable(func):
         raise TypeError("function should be callable.")
 
@@ -645,6 +669,7 @@ def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RP
     with ctx_manager as rf:
         args = args if args else ()
         kwargs = kwargs if kwargs else {}
+        tensor_to_device = to_tensor_to_device(args, arg_devices) # tensor_to_device if tensor_to_device else {}
 
         is_async_exec = hasattr(func, "_wrapped_async_rpc_function")
 
@@ -657,6 +682,7 @@ def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RP
             fut = _invoke_rpc_builtin(
                 dst_worker_info,
                 qualified_name,
+                tensor_to_device,
                 rpc_timeout,
                 *args,
                 **kwargs
@@ -667,6 +693,7 @@ def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RP
                 torch._jit_internal._qualified_name(func),
                 args,
                 kwargs,
+                tensor_to_device,
                 rpc_timeout,
                 is_async_exec
             )
@@ -678,6 +705,7 @@ def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RP
                 dst_worker_info,
                 pickled_python_udf,
                 tensors,
+                tensor_to_device,
                 rpc_timeout,
                 is_async_exec
             )
@@ -694,7 +722,7 @@ def _invoke_rpc(to, func, rpc_type, args=None, kwargs=None, rpc_timeout=UNSET_RP
 
 
 @_require_initialized
-def rpc_sync(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
+def rpc_sync(to, func, args=None, kwargs=None, arg_devices=None, timeout=UNSET_RPC_TIMEOUT):
     r"""
     Make a blocking RPC call to run function ``func`` on worker ``to``. RPC
     messages are sent and received in parallel to execution of Python code. This
@@ -761,12 +789,12 @@ def rpc_sync(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
         >>> rpc.shutdown()
 
     """
-    fut = _invoke_rpc(to, func, RPCExecMode.SYNC, args, kwargs, timeout)
+    fut = _invoke_rpc(to, func, RPCExecMode.SYNC, args, kwargs, arg_devices, timeout)
     return fut.wait()
 
 
 @_require_initialized
-def rpc_async(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
+def rpc_async(to, func, args=None, kwargs=None, arg_devices=None, timeout=UNSET_RPC_TIMEOUT):
     r"""
     Make a non-blocking RPC call to run function ``func`` on worker ``to``. RPC
     messages are sent and received in parallel to execution of Python code. This
@@ -853,7 +881,7 @@ def rpc_async(to, func, args=None, kwargs=None, timeout=UNSET_RPC_TIMEOUT):
         >>> rpc.init_rpc("worker1", rank=1, world_size=2)
         >>> rpc.shutdown()
     """
-    fut = _invoke_rpc(to, func, RPCExecMode.ASYNC, args, kwargs, timeout)
+    fut = _invoke_rpc(to, func, RPCExecMode.ASYNC, args, kwargs, arg_devices, timeout)
     if hasattr(_thread_local_var, "future_list"):
         _thread_local_var.future_list.append(fut)
     return fut
