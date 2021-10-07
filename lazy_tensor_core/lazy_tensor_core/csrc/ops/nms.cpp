@@ -14,8 +14,7 @@ Nms::Nms(const Value& boxes, const Value& scores, const Value& score_threshold,
     : Node(ltc_nms, {boxes, scores, score_threshold, iou_threshold},
            /*num_outputs=*/2, lazy_tensors::util::MHash(output_size)),
       output_size_(output_size) {
-  SetShapeDeferred(
-      [&]() { return compiler::NodeLowering::Get()->Infer(this); });
+  SetShapeDeferred([&]() { return MakeNmsShape(); });
 }
 
 NodePtr Nms::Clone(OpList operands) const {
@@ -27,6 +26,14 @@ std::string Nms::ToString() const {
   std::stringstream ss;
   ss << Node::ToString() << ", output_size=" << output_size_;
   return ss.str();
+}
+
+lazy_tensors::Shape Nms::MakeNmsShape() {
+  lazy_tensors::Shape nms_tensor_shape(lazy_tensors::PrimitiveType::S64,
+                                       {output_size_});
+  nms_tensor_shape.set_dynamic_dimension(0, true);
+  lazy_tensors::Shape nms_count_shape(lazy_tensors::PrimitiveType::S64, {});
+  return lazy_tensors::Shape({nms_tensor_shape, nms_count_shape});
 }
 
 }  // namespace ops

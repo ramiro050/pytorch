@@ -17,6 +17,8 @@ class Nms : public Node {
 
   lazy_tensors::int64 output_size() const { return output_size_; }
 
+  lazy_tensors::Shape MakeNmsShape();
+
  private:
   lazy_tensors::int64 output_size_;
 };
