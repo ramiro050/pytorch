@@ -25,6 +25,7 @@
 #include "lazy_tensor_core/csrc/ops/ltc_ops.h"
 #include "lazy_tensor_core/csrc/ops/nll_loss_backward.h"
 #include "lazy_tensor_core/csrc/ops/nll_loss_forward.h"
+#include "lazy_tensor_core/csrc/ops/nms.h"
 #include "lazy_tensor_core/csrc/ops/permute.h"
 #include "lazy_tensor_core/csrc/ops/repeat.h"
 #include "lazy_tensor_core/csrc/ops/scalar.h"
@@ -240,6 +241,9 @@ class TSNodeLowering : public NodeLowering {
     if (node->op() == *ir::ops::ltc_generic_slice) {
       return LowerGenericSlice(ir::NodeCast<ir::ops::GenericSlice>(
           node, *ir::ops::ltc_generic_slice));
+    }
+    if (node->op() == *ir::ops::ltc_nms) {
+      return LowerNms(ir::NodeCast<ir::ops::Nms>(node, *ir::ops::ltc_nms));
     }
     if (node->op() == *ir::ops::ltc_select) {
       return LowerSelect(
@@ -959,6 +963,12 @@ class TSNodeLowering : public NodeLowering {
     arguments.emplace_back(GetReduction(node->reduction()));
     arguments.emplace_back(node->ignore_index());
 
+    return LowerBuiltin(node, arguments);
+  }
+
+  TSOpVector LowerNms(const ir::ops::Nms* node) {
+    std::vector<torch::jit::NamedValue> arguments;
+    arguments.emplace_back(loctx()->GetOutputOp(node->operand(0)));
     return LowerBuiltin(node, arguments);
   }
 
