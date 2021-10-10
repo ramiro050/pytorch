@@ -956,6 +956,15 @@ at::Tensor LazyNativeFunctions::threshold_backward(const at::Tensor& grad_output
       bridge::GetLtcTensor(grad_output), bridge::GetLtcTensor(self), threshold.to<double>()));
 }
 
+std::tuple<at::Tensor, at::Tensor> LazyNativeFunctions::topk(
+    const at::Tensor& self, int64_t k, int64_t dim, bool largest, bool sorted) {
+  LTC_FN_COUNTER("lazy::");
+  LazyTensor self_tensor = bridge::GetLtcTensor(self);
+  auto outputs = LazyTensor::topk(self_tensor, k, dim, largest, sorted);
+  return std::make_tuple(bridge::AtenFromLtcTensor(std::get<0>(outputs)),
+                         bridge::AtenFromLtcTensor(std::get<1>(outputs)));
+}
+
 at::Tensor LazyNativeFunctions::transpose(const at::Tensor& self, int64_t dim0,
                                           int64_t dim1) {
   LTC_FN_COUNTER("lazy::");

@@ -35,6 +35,7 @@
 #include "lazy_tensor_core/csrc/ops/sum.h"
 #include "lazy_tensor_core/csrc/ops/threshold.h"
 #include "lazy_tensor_core/csrc/ops/threshold_backward.h"
+#include "lazy_tensor_core/csrc/ops/topk.h"
 #include "lazy_tensor_core/csrc/ops/ts_embedding_dense_backward.h"
 #include "lazy_tensor_core/csrc/ops/ts_log_softmax_backward.h"
 #include "lazy_tensor_core/csrc/ops/ts_native_batch_norm_backward.h"
@@ -175,6 +176,10 @@ class TSNodeLowering : public NodeLowering {
       case at::aten::sum: {
         return InferSum(
             ir::NodeCast<ir::ops::Sum>(node, ir::OpKind(at::aten::sum)));
+      }
+      case at::aten::topk: {
+        return InferTopK(
+            ir::NodeCast<ir::ops::TopK>(node, ir::OpKind(at::aten::topk)));
       }
       case at::aten::constant_pad_nd: {
         auto constant_pad_nd = ir::NodeCast<ir::ops::ConstantPadNd>(
@@ -370,6 +375,10 @@ class TSNodeLowering : public NodeLowering {
     if (node->op().op == at::aten::threshold_backward) {
       return LowerThresholdBackward(
           ir::NodeCast<ir::ops::ThresholdBackward>(node, ir::OpKind(at::aten::threshold_backward)));
+    }
+    if (node->op().op == at::aten::topk) {
+      return LowerTopK(
+          ir::NodeCast<ir::ops::TopK>(node, ir::OpKind(at::aten::topk)));
     }
     if (node->op().op == at::aten::unsqueeze) {
       return LowerUnsqueeze(ir::NodeCast<ir::ops::Unsqueeze>(
@@ -605,6 +614,27 @@ class TSNodeLowering : public NodeLowering {
         sum->dtype() ? torch_lazy_tensors::TensorTypeToLtcType(*sum->dtype())
                      : argument_shape.element_type();
     return lazy_tensors::Shape(element_type, output_dimensions);
+  }
+
+  static lazy_tensors::Shape InferTopK(const ir::ops::TopK* topk) {
+    const ir::Output& argument = topk->operand(0);
+    const lazy_tensors::Shape& argument_shape = argument.shape();
+    auto argument_dimensions = argument_shape.dimensions();
+
+
+    std::vector<lazy_tensors::int64> output_dimensions(
+        argument_dimensions.begin(), argument_dimensions.end());
+    output_dimensions[topk->dim()] = topk->k();
+
+
+    lazy_tensors::Shape values_shape(argument_shape.element_type(),
+                                     output_dimensions);
+    lazy_tensors::Shape indices_shape(lazy_tensors::PrimitiveType::S64,
+                                      std::move(output_dimensions));
+
+
+    return lazy_tensors::ShapeUtil::MakeTupleShape({std::move(values_shape),
+        std::move(indices_shape)});
   }
 
   TSOpVector LowerBuiltin(
@@ -1067,6 +1097,17 @@ class TSNodeLowering : public NodeLowering {
     }
     arguments.emplace_back(node->threshold());
     return LowerBuiltin(node, arguments);
+  }
+
+  TSOpVector LowerTopK(const ir::ops::TopK* topk) {
+    std::vector<torch::jit::NamedValue> arguments;
+    arguments.emplace_back(loctx()->GetOutputOp(topk->operand(0)));
+    arguments.emplace_back(topk->k());
+    std::vector<torch::jit::NamedValue> kwarguments;
+    kwarguments.emplace_back("dim", topk->dim());
+    kwarguments.emplace_back("largest", topk->largest());
+    kwarguments.emplace_back("sorted", topk->sorted());
+    return LowerBuiltin(topk, arguments, kwarguments);
   }
 
   TSOpVector LowerUnselect(const ir::ops::Unselect* node) {
