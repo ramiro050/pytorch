@@ -15,6 +15,7 @@ full_codegen:
   - clamp
   - gelu
   - gelu_backward
+  - index.Tensor
   - log2
   - mean
   - mm

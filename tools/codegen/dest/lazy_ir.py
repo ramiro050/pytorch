@@ -4,7 +4,7 @@ from tools.codegen.context import method_with_native_function
 from tools.codegen.model import (BackendIndex, NativeFunction,
                                  NativeFunctionsGroup)
 from tools.codegen.api.types import (BaseCType, OptionalCType, NamedCType,
-                                     VectorCType, kernel_signature)
+                                     VectorCType, ListCType, kernel_signature)
 import tools.codegen.api.dispatcher as dispatcher
 from tools.codegen.api.lazy import LazyIrSchema, isValueType
 from tools.codegen.dest.lazy_ts_lowering import ts_lowering_body
@@ -123,6 +123,7 @@ class {schema.node_name} : public {self.node_base} {{
 def lazy_tensor_decls(value_types: List[NamedCType]) -> str:
     lazy_tensor_decls: List[str] = []
     for t in value_types:
+        print("AAAA", t)
         if isinstance(t.type, BaseCType):
             lazy_tensor_decls.append(
                 f"LazyTensor lazy_{t.name} = "
@@ -135,8 +136,14 @@ def lazy_tensor_decls(value_types: List[NamedCType]) -> str:
                 f"{t.name} ? "
                 f"bridge::TryGetLtcTensor(*{t.name}) : "
                 f"c10::nullopt;")
+        elif isinstance(t.type, ListCType):
+            if isinstance(t.type.elem, OptionalCType):
+                lazy_tensor_decls.append(f"std::vector<c10::optional<LazyTensor>> l_{t.name};")
+                lazy_tensor_decls.append(f"for (auto t: {t.name}) {{")
+                lazy_tensor_decls.append(f"  l_{t.name}.push_back({t.name} ? bridge::TryGetLtcTensor(*{t.name}) : c10::nullopt;")
+                lazy_tensor_decls.append(f"}}")
         else:
-            raise AssertionError("TODO not sure if there are other valid types to handle here")
+            raise AssertionError(f"TODO not sure if there are other valid types to handle here {t}")
     return "\n    ".join(lazy_tensor_decls)
 
 
